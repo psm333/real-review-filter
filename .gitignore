@@ -1,0 +1,8 @@
+# API 키 파일 — 절대 올리지 않기
+.env
+.streamlit/secrets.toml
+
+__pycache__/
+*.pyc
+venv/
+.venv/
