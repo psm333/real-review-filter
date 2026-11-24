@@ -29,14 +29,16 @@ JSON_FORMAT = """
   "cons": [{"product": "해당 제품 이름", "point": "단점", "evidence": "원문 근거 문장"}, ... 최대 3개],
   "pros": [{"product": "해당 제품 이름", "point": "장점", "evidence": "원문 근거 문장"}, ... 최대 3개],
   "comment_analysis": {
-    "ad_suspicion_count": 리뷰가 광고라고 의심하거나 지적하는 댓글 수 (예: "광고네", "협찬 표시 안 함"),
-    "ad_suspicion_examples": ["예시 댓글", ...],
-    "viral_count": 댓글 자체가 홍보·구매 유도로 보이는 댓글 수 (할인 링크, 공구, 과한 칭찬),
-    "viral_examples": ["예시 댓글", ...],
-    "real_user_opinions": [{"type": "장점" 또는 "단점", "opinion": "실사용자 의견 요약"}, ...],
+    "comment_labels": [{"i": 댓글 번호, "label": "지적" 또는 "바이럴" 또는 "경험" 또는 "기타"}, ... 모든 댓글 빠짐없이],
+    "real_user_opinions": [{"type": "장점" 또는 "단점", "opinion": "실사용자 경험담 요약"}, ... 최대 5개],
     "mismatch": "리뷰 본문과 댓글 반응이 다른 점 (없으면 빈 문자열)"
   }
 }
+comment_labels 기준:
+  "지적" = 리뷰가 광고·협찬이라고 의심하거나 지적 (예: "광고네", "협찬 표시 안 함")
+  "바이럴" = 댓글 자체가 홍보·구매 유도 (할인 링크, 공구, 근거 없는 과한 칭찬)
+  "경험" = 제품을 직접 써 본 경험담 (예: "저도 샀는데 배터리 4시간 가요")
+  "기타" = 질문, 감탄, 잡담, 리뷰어 칭찬 등 위에 해당하지 않는 것
 댓글이 없으면 comment_analysis는 null로 두세요.
 """
 
@@ -93,8 +95,8 @@ PROMPTS["D"] = """당신은 광고에 속지 않으면서도 공정한 소비자
    단점은 리뷰 본문에서 찾고, 댓글에서만 나온 불만은 real_user_opinions에 넣으세요.
 3. 핵심 장점 3개: 구체적 경험이나 수치가 있는 장점을 고르세요.
 4. 모든 장단점의 evidence에는 리뷰 본문 문장을 그대로 복사하세요. 근거가 없는 항목은 만들지 마세요.
-5. 댓글 분류: (가) 리뷰가 광고라고 지적 → ad_suspicion, (나) 댓글 자체가 홍보·구매 유도 → viral,
-   (다) 실제 사용 경험담 → real_user_opinions. 리뷰와 댓글 반응이 어긋나는 점은 mismatch에.
+5. 댓글 분류: 번호가 붙은 모든 댓글에 comment_labels 이름표를 하나씩 붙이세요 (빠짐없이).
+   "경험" 댓글은 real_user_opinions에 요약하고, 리뷰와 댓글 반응이 어긋나는 점은 mismatch에.
 6. 여러 제품을 비교하는 리뷰면 review_type을 "여러 제품 비교"로 하고 각 장단점의 product를 적으세요.
 7. 의학적·법률적 판단은 하지 마세요.
 """ + JSON_FORMAT
@@ -136,14 +138,14 @@ def analyze(
 
     user_msg = f"<review>\n{body}\n</review>\n"
     if comments:
-        user_msg += "<comments>\n" + "\n".join(f"- {c}" for c in comments) + "\n</comments>\n"
+        user_msg += "<comments>\n" + "\n".join(f"[{i}] {c}" for i, c in enumerate(comments, 1)) + "\n</comments>\n"
     else:
         user_msg += "(댓글 없음)\n"
     user_msg += "JSON만 출력하세요."
 
     resp = client.chat.completions.create(
         model=model,
-        max_completion_tokens=2000,
+        max_completion_tokens=4000,  # 댓글 이름표까지 담을 수 있게
         response_format={"type": "json_object"},  # JSON으로만 답하게 강제
         messages=[
             {"role": "system", "content": PROMPTS[prompt_version]},
@@ -152,4 +154,36 @@ def analyze(
     )
     raw = resp.choices[0].message.content or ""
     usage = {"input_tokens": resp.usage.prompt_tokens, "output_tokens": resp.usage.completion_tokens}
-    return _parse_json(raw), usage
+    result = _parse_json(raw)
+    _count_comments(result, comments)
+    return result, usage
+
+
+LABELS = {"지적": "ad_suspicion", "바이럴": "viral", "경험": "experience", "기타": "other"}
+
+
+def _count_comments(result: dict, comments: list[str]) -> None:
+    """AI가 댓글마다 붙인 이름표를 코드가 직접 센다 (AI가 말한 숫자를 믿지 않음)."""
+    ca = result.get("comment_analysis")
+    if not comments or not isinstance(ca, dict):
+        return
+    labeled = {}
+    for item in ca.get("comment_labels", []) or []:
+        try:
+            i = int(item.get("i"))
+        except (TypeError, ValueError):
+            continue
+        if 1 <= i <= len(comments) and item.get("label") in LABELS:
+            labeled[i] = item["label"]
+    groups = {key: [] for key in LABELS.values()}
+    for i, c in enumerate(comments, 1):
+        groups[LABELS[labeled.get(i, "기타")]].append(c)
+    ca["total"] = len(comments)
+    ca["unlabeled"] = len(comments) - len(labeled)
+    ca["ad_suspicion_count"] = len(groups["ad_suspicion"])
+    ca["ad_suspicion_examples"] = groups["ad_suspicion"]
+    ca["viral_count"] = len(groups["viral"])
+    ca["viral_examples"] = groups["viral"]
+    ca["experience_count"] = len(groups["experience"])
+    ca["experience_comments"] = groups["experience"]
+    ca["other_count"] = len(groups["other"])

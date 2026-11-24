@@ -79,6 +79,31 @@ def get_youtube_comments(video_id: str, api_key: str, max_count: int = 50) -> li
     return comments[:max_count]
 
 
+def get_youtube_meta(video_id: str) -> dict:
+    """영상 제목·채널·썸네일. 키가 필요 없는 oEmbed를 쓰고, 실패해도 기본값으로 진행한다."""
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    meta = {
+        "title": "유튜브 리뷰 영상",
+        "channel": "YouTube",
+        "thumb": f"https://i.ytimg.com/vi/{video_id}/mqdefault.jpg",
+        "url": url,
+    }
+    try:
+        r = requests.get(
+            "https://www.youtube.com/oembed",
+            params={"url": url, "format": "json"},
+            headers=HEADERS,
+            timeout=8,
+        )
+        if r.ok:
+            j = r.json()
+            meta["title"] = j.get("title") or meta["title"]
+            meta["channel"] = j.get("author_name") or meta["channel"]
+    except (requests.RequestException, ValueError):
+        pass
+    return meta
+
+
 # ---------------- 블로그 ----------------
 def _naver_postview_url(url: str) -> str | None:
     m = re.search(r"blog\.naver\.com/([\w-]+)/(\d+)", url)
@@ -90,15 +115,30 @@ def _naver_postview_url(url: str) -> str | None:
     return None
 
 
-def get_blog_text(url: str) -> str:
+def get_blog_post(url: str) -> tuple[dict, str]:
+    """블로그 글의 (정보, 본문)을 가져온다. 정보 = 제목, 블로그 이름, 대표 이미지, 주소."""
     target = _naver_postview_url(url) or url
     try:
         r = requests.get(target, headers=HEADERS, timeout=10)
         r.raise_for_status()
     except requests.RequestException as e:
-        raise FetchError("블로그 글을 열지 못했어요. '직접 붙여넣기'를 써 주세요.") from e
+        raise FetchError("블로그 글을 열지 못했어요. 글 내용을 복사해서 붙여넣어 주세요.") from e
 
     soup = BeautifulSoup(r.text, "html.parser")
+
+    def og(prop: str) -> str:
+        tag = soup.find("meta", attrs={"property": prop})
+        return (tag.get("content") or "").strip() if tag else ""
+
+    title_tag = soup.select_one(".se-title-text")
+    meta = {
+        "title": og("og:title") or (title_tag.get_text(strip=True) if title_tag else "")
+        or (soup.title.get_text(strip=True) if soup.title else "블로그 리뷰"),
+        "channel": og("og:site_name") or ("네이버 블로그" if "naver" in url else "블로그"),
+        "thumb": og("og:image"),
+        "url": url,
+    }
+
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
     main = (
@@ -109,5 +149,9 @@ def get_blog_text(url: str) -> str:
     )
     text = main.get_text("\n", strip=True) if main else ""
     if len(text) < 100:
-        raise FetchError("블로그 본문이 거의 비어 있어요. '직접 붙여넣기'를 써 주세요.")
-    return text
+        raise FetchError("블로그 본문이 거의 비어 있어요. 글 내용을 복사해서 붙여넣어 주세요.")
+    return meta, text
+
+
+def get_blog_text(url: str) -> str:
+    return get_blog_post(url)[1]
