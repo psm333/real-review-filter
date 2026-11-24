@@ -266,8 +266,14 @@ COMPARE_PROMPT = """당신은 두 제품의 리뷰 종합 결과를 비교하는
   "summary": "비교 한 줄 평",
   "differences": [{{"topic": "비교 항목", "a": "제품 A는 ~", "b": "제품 B는 ~"}}, ... 최대 5개],
   "picks": [{{"situation": "이런 사람이라면", "pick": "A" 또는 "B" 또는 "비슷함", "reason": "이유 한 문장"}}, ... 3개],
+  "criteria": [{{"name": "비교 기준 (예: 배터리, 휴대성, 통화 품질)", "weight": 1~5 정수 (이 사용자에게 중요한 정도), "a": 0~10 정수 (제품 A 점수), "b": 0~10 정수 (제품 B 점수), "reason": "점수 근거 한 문장"}}, ... 3~6개],
   "caution": "비교할 때 주의할 점 (예: 리뷰 수가 적음)"
 }}
+criteria 규칙:
+- 두 제품의 리뷰에 실제로 나온 내용으로만 기준과 점수를 정하세요. 근거가 없는 기준은 넣지 마세요.
+- 한쪽 리뷰에만 정보가 있는 기준은 넣지 마세요 (공정한 비교가 안 됨).
+- weight는 사용 목적이 있으면 그 목적에 중요한 기준일수록 높게, 없으면 일반 소비자 기준으로 정하세요.
+- 최종 비율은 코드가 계산하니 비율을 직접 쓰지 마세요.
 """
 
 
@@ -286,7 +292,39 @@ def compare(name_a: str, agg_a: dict, name_b: str, agg_b: dict, purpose: str = "
     purpose_part = f'\n사용자의 사용 목적은 "{purpose}"입니다. picks의 첫 항목은 이 목적에 대한 추천으로 하세요.' if purpose else ""
     system = COMPARE_PROMPT.format(purpose_part=purpose_part)
     user = f"[제품 A] {_agg_digest(name_a, agg_a)}\n\n[제품 B] {_agg_digest(name_b, agg_b)}"
-    return _chat_json(system, user, model, api_key, max_tokens=2000)
+    result, usage = _chat_json(system, user, model, api_key, max_tokens=2500)
+    result["split"] = fit_split(result.get("criteria") or [])
+    return result, usage
+
+
+def _clamp(v, lo: int, hi: int, default: int) -> int:
+    try:
+        return max(lo, min(hi, int(round(float(v)))))
+    except (TypeError, ValueError):
+        return default
+
+
+def fit_split(criteria: list[dict]) -> dict | None:
+    """기준별 점수 × 중요도를 더해 '나에게 맞는 정도'를 A:B = 100으로 나눈다 (코드가 계산).
+    차이가 10%p 미만이면 '비슷함'으로 본다."""
+    sum_a = sum_b = 0.0
+    used = []
+    for c in criteria:
+        if not c.get("name"):
+            continue
+        w = _clamp(c.get("weight"), 1, 5, 3)
+        a = _clamp(c.get("a"), 0, 10, 5)
+        b = _clamp(c.get("b"), 0, 10, 5)
+        c.update(weight=w, a=a, b=b)
+        sum_a += w * a
+        sum_b += w * b
+        used.append(c)
+    if not used or sum_a + sum_b == 0:
+        return None
+    pa = round(sum_a / (sum_a + sum_b) * 100)
+    pb = 100 - pa
+    winner = "비슷함" if abs(pa - pb) < 10 else ("A" if pa > pb else "B")
+    return {"a": pa, "b": pb, "winner": winner, "sum_a": round(sum_a), "sum_b": round(sum_b), "n": len(used)}
 
 
 # ======================= 리뷰에 질문하기 =======================

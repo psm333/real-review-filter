@@ -31,26 +31,70 @@ def extract_video_id(url: str) -> str:
     raise FetchError("유튜브 링크에서 영상 ID를 찾지 못했어요. 링크를 다시 확인해 주세요.")
 
 
+def _to_segments(fetched) -> list[dict]:
+    """라이브러리 버전마다 다른 자막 형식을 [{"start": 초, "text": 문장}] 하나로 맞춘다."""
+    out = []
+    for seg in fetched:
+        if isinstance(seg, dict):
+            out.append({"start": float(seg["start"]), "text": seg["text"]})
+        else:
+            out.append({"start": float(seg.start), "text": seg.text})
+    return out
+
+
+# 실패 이유(라이브러리의 오류 이름) → 사용자에게 보여줄 말
+TRANSCRIPT_ERRORS = {
+    "TranscriptsDisabled": "이 영상은 만든 사람이 자막을 꺼 두었어요.",
+    "NoTranscriptFound": "이 영상에는 가져올 수 있는 자막이 없어요.",
+    "NoTranscriptAvailable": "이 영상에는 가져올 수 있는 자막이 없어요.",
+    "VideoUnavailable": "영상을 열 수 없어요 (비공개·삭제된 영상일 수 있어요).",
+    "AgeRestricted": "연령 제한 영상이라 자막을 가져올 수 없어요.",
+    "InvalidVideoId": "영상 주소가 올바르지 않아요.",
+    "RequestBlocked": "유튜브가 잠시 자막 요청을 막았어요. 짧은 시간에 요청이 많으면 생겨요. 10~30분 뒤에 다시 하거나, 휴대폰 핫스팟처럼 다른 인터넷으로 시도해 보세요.",
+    "IpBlocked": "유튜브가 이 인터넷(IP)의 자막 요청을 막았어요. 10~30분 뒤에 다시 하거나, 휴대폰 핫스팟처럼 다른 인터넷으로 시도해 보세요.",
+    "TooManyRequests": "유튜브에 요청이 너무 많았어요. 10~30분 뒤에 다시 시도해 보세요.",
+    "YouTubeRequestFailed": "유튜브 서버와 연결이 잠시 실패했어요. 잠시 후 다시 시도해 보세요.",
+    "CouldNotRetrieveTranscript": "자막을 가져오지 못했어요.",
+}
+
+
+def _transcript_error(err: Exception) -> FetchError:
+    name = type(err).__name__
+    msg = TRANSCRIPT_ERRORS.get(name, f"자막을 가져오지 못했어요 (이유: {name}).")
+    return FetchError(msg + " 리뷰 내용을 복사해서 붙여넣으면 분석할 수 있어요.")
+
+
 def get_youtube_segments(video_id: str) -> list[dict]:
-    """자막을 [{"start": 초, "text": 문장}, ...] 로 가져온다. 근거 문장 → 영상 장면 이동에 쓴다."""
+    """자막을 [{"start": 초, "text": 문장}, ...] 로 가져온다. 근거 문장 → 영상 장면 이동에 쓴다.
+    한국어·영어 자막을 먼저 찾고, 없으면 다른 언어 자막을 한국어로 번역해서라도 가져온다."""
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
     except ImportError as e:
         raise FetchError("youtube-transcript-api 가 설치되지 않았어요.") from e
 
     langs = ["ko", "en"]
+    api = YouTubeTranscriptApi()
+    new_version = hasattr(api, "fetch")  # 1.x 는 fetch/list, 0.x 는 get_transcript/list_transcripts
     try:
-        try:  # 새 버전(1.x)
-            fetched = YouTubeTranscriptApi().fetch(video_id, languages=langs)
-            return [{"start": float(s.start), "text": s.text} for s in fetched]
-        except AttributeError:  # 옛 버전(0.x)
-            data = YouTubeTranscriptApi.get_transcript(video_id, languages=langs)
-            return [{"start": float(d["start"]), "text": d["text"]} for d in data]
-    except Exception as e:
-        raise FetchError(
-            "이 영상은 자막을 가져올 수 없어요 (자막이 없거나 막혀 있음). "
-            "리뷰 내용을 복사해서 붙여넣어 주세요."
-        ) from e
+        if new_version:
+            return _to_segments(api.fetch(video_id, languages=langs))
+        return _to_segments(YouTubeTranscriptApi.get_transcript(video_id, languages=langs))
+    except Exception as first:
+        if type(first).__name__ != "NoTranscriptFound":
+            raise _transcript_error(first) from first
+        # 한국어·영어 자막이 없으면: 있는 자막 아무거나 → 가능하면 한국어로 번역
+        try:
+            listing = api.list(video_id) if new_version else YouTubeTranscriptApi.list_transcripts(video_id)
+            for tr in listing:
+                try:
+                    if getattr(tr, "is_translatable", False):
+                        return _to_segments(tr.translate("ko").fetch())
+                    return _to_segments(tr.fetch())
+                except Exception:
+                    continue
+        except Exception as second:
+            raise _transcript_error(second) from second
+        raise _transcript_error(first) from first
 
 
 def get_youtube_transcript(video_id: str) -> str:

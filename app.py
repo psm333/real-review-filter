@@ -185,6 +185,14 @@ details p { font-size:.86rem; color:var(--sub); line-height:1.7; }
 .guide .eg { display:inline-block; font-size:.72rem; padding:1px 8px; border-radius:99px; background:#1F1F1C; color:#fff; white-space:nowrap; }
 .guide-land { margin-top:1.4rem; }
 .down { text-align:center; font-size:.85rem; color:#3B7DD8; font-weight:700; margin-top:.6rem; }
+.split { background:#fff; border:1px solid var(--line); border-radius:14px; padding:16px 18px; margin:.6rem 0 1rem; }
+.split .rec { font-size:1.25rem; font-weight:800; margin-bottom:.8rem; }
+.split .rec small { display:block; font-size:.82rem; font-weight:500; color:var(--sub); margin-top:4px; }
+.split .bar { display:flex; height:38px; border-radius:10px; overflow:hidden; font-weight:800; font-size:.95rem; }
+.split .bar div { display:flex; align-items:center; padding:0 12px; color:#fff; white-space:nowrap; overflow:hidden; }
+.split .bar .a { background:#2F6FD0; } .split .bar .b { background:#E07A2E; justify-content:flex-end; }
+.split .names { display:flex; justify-content:space-between; font-size:.82rem; color:var(--sub); margin-top:6px; }
+.dots { letter-spacing:1px; color:#2F6FD0; } .dots span { color:#D8D6CF; }
 .foot { text-align:center; font-size:.76rem; color:#A9A8A2; margin-top:3rem; }
 [data-testid="stBottom"] > div { background: transparent; }
 [data-testid="stChatInput"] { border-radius: 14px !important; border:1px solid var(--line) !important; background:#fff !important; box-shadow: 0 6px 24px rgba(0,0,0,.06); }
@@ -383,7 +391,10 @@ def run_compare(qa: str, qb: str, s: dict):
                 raise FetchError(f"제품 {label}의 리뷰를 분석하지 못했어요. " + (fails[0]["error"] if fails else ""))
             agg, u = aggregate([{"meta": o["src"]["meta"], "result": o["result"]} for o in oks],
                                s["purpose"], s["model"], OPENAI_KEY)
-            sides.append({"label": label, "name": name or f"제품 {label}", "reviews": oks, "fails": fails,
+            if not name:  # 링크로 넣었으면 리뷰에 나온 제품 이름을 쓴다
+                prods = oks[0]["result"].get("products") or []
+                name = str(prods[0])[:30] if prods else f"제품 {label}"
+            sides.append({"label": label, "name": name, "reviews": oks, "fails": fails,
                           "agg": agg, "usage": sum_usage(u, *[o["usage"] for o in oks])})
         st.write("⚖️ 두 제품을 비교하는 중")
         cmp, cu = compare(sides[0]["name"], sides[0]["agg"], sides[1]["name"], sides[1]["agg"],
@@ -542,7 +553,9 @@ def guide(kind: str, has_video: bool = False) -> str:
         title = "💡 처음이라면: 이 화면 읽는 법"
     else:
         items = [
-            '<li><b>🎯 상황별 추천</b>에서 내 상황에 맞는 카드를 찾아보세요. 한쪽이 무조건 낫다고 하지 않아요.</li>',
+            '<li><b>🏆 나에게 맞는 제품</b>의 막대는 두 제품이 나에게 얼마나 맞는지를 100으로 나눈 비율이에요. 아래 표에서 기준별 점수와 중요도를 확인할 수 있어요.</li>',
+            '<li><b>🎯 사용 목적</b>을 고르면 그 목적에 중요한 기준의 중요도가 높아져서 비율이 달라져요.</li>',
+            '<li><b>🎯 상황별 추천</b>에서 내 상황에 맞는 카드를 찾아보세요.</li>',
             '<li><b>2/5</b> 같은 숫자는 “그 제품 리뷰 5개 중 2개가 말했다”는 뜻이에요.</li>',
             '<li>리뷰 수가 적은 쪽은 결과가 치우칠 수 있어요. 위의 ⚠️ 주의 문구를 꼭 확인하세요.</li>',
         ]
@@ -706,7 +719,7 @@ def render_multi(d: dict):
 
 
 # ======================= 화면: 제품 비교 =======================
-COMPARE_TOC = [("summary", "한눈에 보기"), ("picks", "상황별 추천"), ("diff", "차이점"), ("vs", "단점·장점 나란히"),
+COMPARE_TOC = [("summary", "한눈에 보기"), ("fit", "나에게 맞는 제품"), ("picks", "상황별 추천"), ("diff", "차이점"), ("vs", "단점·장점 나란히"),
                ("reviews", "분석한 리뷰")]
 
 
@@ -716,6 +729,29 @@ def side_col(side: dict) -> str:
     pros = "".join(f"<li>{e(p.get('point'))} <span class='cnt good'>{p.get('count')}/{n}</span></li>" for p in agg.get("common_pros", [])[:4])
     return (f'<div class="col"><h4>{side["label"]} · {e(side["name"])}</h4><div class="note">리뷰 {n}개 · {e(agg.get("summary"))}</div>'
             f'<div class="k">👎 공통 단점</div><ol>{cons or "<li>없음</li>"}</ol><div class="k">👍 공통 장점</div><ol>{pros or "<li>없음</li>"}</ol></div>')
+
+
+def split_html(cmp: dict, name_a: str, name_b: str) -> str:
+    sp = cmp.get("split")
+    if not sp:
+        return '<p class="note">두 제품을 같은 기준으로 비교할 만큼 리뷰 내용이 겹치지 않아서 비율을 계산하지 못했어요.</p>'
+    if sp["winner"] == "비슷함":
+        rec = f"두 제품이 비슷하게 맞아요 ({sp['a']} : {sp['b']})<small>차이가 10%p 미만이라 한쪽을 추천하지 않았어요. 아래 상황별 추천을 참고하세요.</small>"
+    else:
+        win = name_a if sp["winner"] == "A" else name_b
+        rec = f"👉 {e(win)} 추천<small>내 기준으로 계산하면 {e(win)} 쪽이 {abs(sp['a'] - sp['b'])}%p 더 잘 맞아요.</small>"
+    bar = (f'<div class="bar"><div class="a" style="width:{max(sp["a"], 8)}%">{sp["a"]}%</div>'
+           f'<div class="b" style="width:{max(sp["b"], 8)}%">{sp["b"]}%</div></div>'
+           f'<div class="names"><span>A · {e(name_a)}</span><span>B · {e(name_b)}</span></div>')
+    rows = "".join(
+        f"<tr><td><b>{e(c.get('name'))}</b></td><td class='dots'>{'●' * c['weight']}<span>{'●' * (5 - c['weight'])}</span></td>"
+        f"<td>{c['a']}</td><td>{c['b']}</td><td>{e(c.get('reason'))}</td></tr>"
+        for c in (cmp.get("criteria") or []) if "weight" in c
+    )
+    table = (f'<table class="diff" style="margin-top:12px"><tr><th>기준</th><th>나에게 중요한 정도</th><th>A</th><th>B</th><th>점수 근거</th></tr>{rows}</table>'
+             f'<p class="note" style="margin-top:8px">계산 방법: 기준마다 (점수 × 중요도)를 더해서 A 합계 {sp["sum_a"]}, B 합계 {sp["sum_b"]} → 전체 중 비율로 나눴어요. '
+             f'점수와 중요도는 AI가 리뷰를 읽고 매기고, 비율은 코드가 계산해요. 차이가 10%p 미만이면 "비슷함"으로 봐요.</p>')
+    return f'<div class="split"><div class="rec">{rec}</div>{bar}{table}</div>'
 
 
 def render_compare(d: dict):
@@ -730,8 +766,10 @@ def render_compare(d: dict):
     out.append(f'<p class="lead">{e(cmp.get("summary"))}</p>')
     if cmp.get("caution"):
         out.append(f'<div class="callout">⚠️ {e(cmp["caution"])}</div>')
-    out.append(section("picks", "🎯 상황별 추천", "한쪽이 무조건 낫다고 하지 않아요"))
     names = {"A": a["name"], "B": b["name"]}
+    out.append(section("fit", "🏆 나에게 맞는 제품", f"'{s['purpose']}' 기준" if s["purpose"] else "일반 소비자 기준 (사용 목적을 고르면 더 정확해요)"))
+    out.append(split_html(cmp, a["name"], b["name"]))
+    out.append(section("picks", "🎯 상황별 추천", "한쪽이 무조건 낫다고 하지 않아요"))
     picks = "".join(
         f'<div class="pick"><span class="who">{e(p.get("situation"))}</span><span class="p">{e(names.get(p.get("pick"), p.get("pick")))}</span>{e(p.get("reason"))}</div>'
         for p in (cmp.get("picks") or [])[:3]
