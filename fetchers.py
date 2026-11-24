@@ -31,7 +31,8 @@ def extract_video_id(url: str) -> str:
     raise FetchError("유튜브 링크에서 영상 ID를 찾지 못했어요. 링크를 다시 확인해 주세요.")
 
 
-def get_youtube_transcript(video_id: str) -> str:
+def get_youtube_segments(video_id: str) -> list[dict]:
+    """자막을 [{"start": 초, "text": 문장}, ...] 로 가져온다. 근거 문장 → 영상 장면 이동에 쓴다."""
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
     except ImportError as e:
@@ -41,15 +42,44 @@ def get_youtube_transcript(video_id: str) -> str:
     try:
         try:  # 새 버전(1.x)
             fetched = YouTubeTranscriptApi().fetch(video_id, languages=langs)
-            return " ".join(s.text for s in fetched)
+            return [{"start": float(s.start), "text": s.text} for s in fetched]
         except AttributeError:  # 옛 버전(0.x)
             data = YouTubeTranscriptApi.get_transcript(video_id, languages=langs)
-            return " ".join(d["text"] for d in data)
+            return [{"start": float(d["start"]), "text": d["text"]} for d in data]
     except Exception as e:
         raise FetchError(
             "이 영상은 자막을 가져올 수 없어요 (자막이 없거나 막혀 있음). "
-            "'직접 붙여넣기'로 내용을 넣어 주세요."
+            "리뷰 내용을 복사해서 붙여넣어 주세요."
         ) from e
+
+
+def get_youtube_transcript(video_id: str) -> str:
+    return " ".join(seg["text"] for seg in get_youtube_segments(video_id))
+
+
+def search_youtube_reviews(product: str, api_key: str, n: int = 5) -> list[str]:
+    """제품 이름으로 유튜브 리뷰 영상을 찾아 링크 목록을 돌려준다 (YouTube Data API 필요)."""
+    if not api_key:
+        raise FetchError("제품 이름 검색은 YOUTUBE_API_KEY 가 있어야 해요. 리뷰 링크를 직접 넣어 주세요.")
+    params = {
+        "part": "snippet",
+        "q": f"{product} 리뷰",
+        "type": "video",
+        "maxResults": min(max(n * 2, n), 15),  # 자막 없는 영상이 섞일 수 있어 넉넉히
+        "relevanceLanguage": "ko",
+        "regionCode": "KR",
+        "videoCaption": "any",
+        "key": api_key,
+    }
+    try:
+        r = requests.get("https://www.googleapis.com/youtube/v3/search", params=params, timeout=10)
+        r.raise_for_status()
+    except requests.RequestException as e:
+        raise FetchError("유튜브 검색에 실패했어요. 잠시 후 다시 시도하거나 링크를 직접 넣어 주세요.") from e
+    ids = [it["id"]["videoId"] for it in r.json().get("items", []) if it.get("id", {}).get("videoId")]
+    if not ids:
+        raise FetchError(f"'{product}' 리뷰 영상을 찾지 못했어요. 제품 이름을 바꿔 보세요.")
+    return [f"https://www.youtube.com/watch?v={v}" for v in ids]
 
 
 def get_youtube_comments(video_id: str, api_key: str, max_count: int = 50) -> list[str]:
